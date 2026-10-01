@@ -86,6 +86,10 @@ public class BioBuzzStarterbotTeleop extends OpMode {
     // Create a variable to set to the intake.
     double intakePower;
 
+    // Auto-intake toggle state and edge detection
+    private boolean autoIntakeEnabled = false;
+    private boolean previousAState = false;
+
     /*
      * Code to run ONCE when the driver hits INIT
      */
@@ -97,13 +101,13 @@ public class BioBuzzStarterbotTeleop extends OpMode {
          * to 'get' must correspond to the names assigned during the robot configuration
          * step.
          */
-        leftDrive = hardwareMap.get(DcMotor.class, "left_drive");
-        rightDrive = hardwareMap.get(DcMotor.class, "right_drive");
+        leftDrive = hardwareMap.get(DcMotor.class, "leftDrive");
+        rightDrive = hardwareMap.get(DcMotor.class, "rightDrive");
         intake = hardwareMap.get(DcMotor.class, "intake");
         launcher = hardwareMap.get(DcMotorEx.class, "launcher");
         windmillServo = hardwareMap.get(CRServo.class, "windmill");
-        leftIntakeServo = hardwareMap.get(CRServo.class, "left_intake_servo");
-        rightIntakeServo = hardwareMap.get(CRServo.class, "right_intake_servo");
+        leftIntakeServo = hardwareMap.get(CRServo.class, "leftIntakeServo");
+        rightIntakeServo = hardwareMap.get(CRServo.class, "rightIntakeServo");
 
         /*
          * To drive forward, most robots need the motor on one side to be reversed,
@@ -114,6 +118,7 @@ public class BioBuzzStarterbotTeleop extends OpMode {
          */
         leftDrive.setDirection(DcMotor.Direction.FORWARD);
         rightDrive.setDirection(DcMotor.Direction.REVERSE);
+        intake.setDirection(DcMotor.Direction.FORWARD);
 
         /*
          * Setting zeroPowerBehavior to BRAKE enables a "brake mode". This causes the motor to
@@ -169,35 +174,39 @@ public class BioBuzzStarterbotTeleop extends OpMode {
     public void start() {
     }
 
-    /*
-     * Code to run REPEATEDLY after the driver hits START but before they hit STOP
-     */
+
     @Override
     public void loop() {
         /*
          * Here we call a function called arcadeDrive. The arcadeDrive function takes the input from
          * the joysticks, and applies power to the left and right drive motor to move the robot
-         * as requested by the driver. "arcade" refers to the control style we're using here.
-         * Much like a classic arcade game, when you move the left joystick forward both motors
-         * work to drive the robot forward, and when you move the right joystick left and right
-         * both motors work to rotate the robot. Combinations of these inputs can be used to create
-         * more complex maneuvers.
+         * as requested by the driver.
+         * Hold Left Bumper for precision (40% speed) mode for fine adjustments.
          */
-        arcadeDrive(-gamepad1.left_stick_y, gamepad1.right_stick_x);
+        double driveScale = gamepad1.left_bumper ? 0.4 : 1.0;
+        arcadeDrive(-gamepad1.left_stick_y * driveScale, gamepad1.right_stick_x * driveScale);
 
         /*
-         * Set the intake power variable to equal the right trigger, minus the left trigger.
-         * Each trigger outputs a signal from 0-1, with 0 as fully released, and 1 fully depressed.
-         * This gives us proportional control of the intake speed. The speed increases as we pull
-         * the right trigger further. It's occasionally helpful to be able to reverse the intake,
-         * so we also factor in the left trigger. If the left trigger is fully depressed,
-         * the intakePower variable will be -1. If the right trigger is fully depressed, the variable
-         * will be 1. If the driver pulls both triggers, the intake will remain off.
-         * We use this technique (creating a variable, and setting it to our control inputs) to
-         * allow us to avoid setting the same motors/servos power more than once per loop. That can
-         * create erratic behavior.
+         * Toggle continuous intake mode with button 'A'.
          */
-        intakePower = gamepad1.right_trigger - gamepad1.left_trigger;
+        if (gamepad1.a && !previousAState) {
+            autoIntakeEnabled = !autoIntakeEnabled;
+        }
+        previousAState = gamepad1.a;
+
+        /*
+         * Set the intake power:
+         * 1. Direct trigger input (Right Trigger = Intake, Left Trigger = Reverse) takes priority.
+         * 2. If no trigger is pressed and continuous auto-intake is toggled ON, intake runs at full power.
+         * 3. Otherwise intake is off (0 power).
+         */
+        if (Math.abs(gamepad1.right_trigger) > 0.1 || Math.abs(gamepad1.left_trigger) > 0.1) {
+            intakePower = gamepad1.right_trigger - gamepad1.left_trigger;
+        } else if (autoIntakeEnabled) {
+            intakePower = 1.0;
+        } else {
+            intakePower = 0.0;
+        }
 
         /*
          * The launch() function handles setting motor velocity, and running the windmill servo
@@ -206,22 +215,22 @@ public class BioBuzzStarterbotTeleop extends OpMode {
         launch();
 
         /*
-         * Here we set our intake motor and servos to their intake power. The order of operations
-         * here is important though. The gamepad triggers define the starting point for the intake
-         * power variable in each loop of our code, but inside our launch function we also sometimes
-         * change the intake power. So we need to give our launch function a chance to modify the
-         * variable before we write it to our motor and servos.
+         * Drive all intake hardware (intake motor, left intake servo, right intake servo).
          */
         intake.setPower(intakePower);
         leftIntakeServo.setPower(intakePower);
         rightIntakeServo.setPower(intakePower);
 
         /*
-         * Show motor powers on the Driver Station via telemetry.
+         * Show telemetry on the Driver Station.
          */
+        telemetry.addData("Drive Mode", gamepad1.left_bumper ? "SLOW (40%)" : "FULL (100%)");
         telemetry.addData("Motors", "left (%.2f), right (%.2f)", leftPower, rightPower);
-        telemetry.addLine();
-
+        telemetry.addData("Auto-Intake [A]", autoIntakeEnabled ? "ON" : "OFF");
+        telemetry.addData("Intake Power", "%.2f", intakePower);
+        telemetry.addData("Launcher Status", gamepad1.right_bumper ? (launcher.getVelocity() > LAUNCHER_MIN_VELOCITY ? "READY TO LAUNCH" : "SPINNING UP") : "IDLE");
+        telemetry.addData("Launcher Velocity", "%.0f / %d ticks/sec", launcher.getVelocity(), LAUNCHER_TARGET_VELOCITY);
+        telemetry.update();
     }
 
     /*
@@ -236,6 +245,15 @@ public class BioBuzzStarterbotTeleop extends OpMode {
         rightPower = forward - rotate;
 
         /*
+         * Normalize drive powers so neither side exceeds +/- 1.0
+         */
+        double max = Math.max(Math.abs(leftPower), Math.abs(rightPower));
+        if (max > 1.0) {
+            leftPower /= max;
+            rightPower /= max;
+        }
+
+        /*
          * Send calculated power to motors
          */
         leftDrive.setPower(leftPower);
@@ -245,11 +263,8 @@ public class BioBuzzStarterbotTeleop extends OpMode {
     void launch() {
         /*
          * Calling gamepad1.right_bumper returns a boolean which will be true if the bumper is
-         * held down, and false if it is not. Notably, this will continue to be true for every
-         * cycle of our code that the driver holds down that bumper.
-         * The first step of our launch() function is checking to see if the user is currently
-         * holding down the right gamepad. If they are, then we want to start spinning up the launcher.
-         * Otherwise, we start spinning the launcher down.
+         * held down, and false if it is not.
+         * Holding Right Bumper spins up the high-speed launcher motor.
          */
         if (gamepad1.right_bumper) {
             launcher.setVelocity(LAUNCHER_TARGET_VELOCITY);
@@ -258,19 +273,14 @@ public class BioBuzzStarterbotTeleop extends OpMode {
         }
 
         /*
-         * Here we ask if the driver is currently pressing the right bumper, AND the launcher is
-         * spinning fast enough to make a successful shot. If it is, then we will turn on the
-         * windmill servo to start feeding the elements into the launcher motor. We also
-         * add some power to the intake power. This can sometimes help dislodge stuck elements from
-         * inside the hopper.
+         * If launcher is at target speed, run the windmill servo and boost intake to feed elements.
          */
         if (gamepad1.right_bumper && launcher.getVelocity() > LAUNCHER_MIN_VELOCITY) {
             windmillServo.setPower(1);
-            intakePower += 0.5;
+            intakePower = Math.max(intakePower, 0.8);
         } else {
             windmillServo.setPower(0);
         }
     }
-
 
 }
